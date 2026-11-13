@@ -1,23 +1,22 @@
-'''
-!pip install datasets
-'''
+"""Transcribe an evaluation set with one model and push the transcriptions to the Hub.
 
-from datasets import load_dataset, Audio
-from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline
-import torch
+The transcriptions are added as a new column named after the model, so
+compute_cer.py can later score every model stored in the same dataset.
+
+    !pip install datasets
+"""
+
 from dataclasses import dataclass
 from typing import Optional
 
+import torch
+from datasets import Audio, load_dataset
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-# -------------------- Authentication --------------------
-from huggingface_hub import login
-from kaggle_secrets import UserSecretsClient
+from khmer_asr.audio import SAMPLING_RATE
+from khmer_asr.hub import login_to_hub
 
-user_secrets = UserSecretsClient()
-hg_key = user_secrets.get_secret("hg-main")
-login(token=hg_key, add_to_git_credential=False)
 
-# -------------------- Config --------------------
 @dataclass(frozen=True)
 class Config:
     MODEL_NAME:            str = "PhanithLIM/whisper-medium-aug-05-june"
@@ -25,36 +24,42 @@ class Config:
     TASK:                  str = "transcribe"
     LANGUAGE:              str = "Khmer"
     DATASET_NAME:          str = "PhanithLIM/asr-wmc-evaluate"
-    COLUMN_NAMES:          str = MODEL_NAME.split("/")[-1]
+    PREDICTION_COLUMN:     str = MODEL_NAME.split("/")[-1]
     SPLIT:                 str = "test"
     DEVICE:                str = "cuda" if torch.cuda.is_available() else "cpu"
     MAX_LENGTH:  Optional[int] = 2024
     NUM_BEAMS:   Optional[int] = 5
-    SAMPLING_RATE:         int = 16_000
-
-# -------------------- Load Model and Processor --------------------
-dataset = load_dataset(Config.DATASET_NAME, split=Config.SPLIT)
-dataset = dataset.cast_column("audio", Audio(sampling_rate=Config.SAMPLING_RATE))
-print(dataset)
 
 
-# -------------------- Load Model and Processor --------------------
-
-model = WhisperForConditionalGeneration.from_pretrained(Config.MODEL_NAME)
-model.to(Config.DEVICE)
-processor = WhisperProcessor.from_pretrained(Config.PROCESSOR_NAME, language=Config.LANGUAGE, task=Config.TASK)
-
-# -------------------- Pipeline --------------------
-def map_to_pred(batch):
-    audio = batch["audio"]
-    input_features = processor(audio["array"], sampling_rate=audio["sampling_rate"], return_tensors="pt").input_features
-    with torch.no_grad():
-        predicted_ids = model.generate(input_features.to(Config.DEVICE), language=Config.LANGUAGE, max_length=Config.MAX_LENGTH, num_beams=Config.NUM_BEAMS)[0]
-    transcription = processor.decode(predicted_ids, skip_special_tokens=True)
-    batch[f"{Config.COLUMN_NAMES}"] = transcription
-    return batch
+def make_transcriber(model, processor):
+    """Return a `dataset.map` function that adds the model's transcription to a row."""
+    def transcribe(example):
+        audio = example["audio"]
+        features = processor(audio["array"], sampling_rate=audio["sampling_rate"],
+                             return_tensors="pt").input_features
+        with torch.no_grad():
+            predicted_ids = model.generate(features.to(Config.DEVICE), language=Config.LANGUAGE,
+                                           max_length=Config.MAX_LENGTH, num_beams=Config.NUM_BEAMS)[0]
+        example[Config.PREDICTION_COLUMN] = processor.decode(predicted_ids, skip_special_tokens=True)
+        return example
+    return transcribe
 
 
-result = dataset.map(map_to_pred)
-result.push_to_hub(Config.DATASET_NAME, split='test')
-print("Results pushed to the hub successfully.")
+def main():
+    login_to_hub()
+
+    dataset = load_dataset(Config.DATASET_NAME, split=Config.SPLIT)
+    dataset = dataset.cast_column("audio", Audio(sampling_rate=SAMPLING_RATE))
+    print(dataset)
+
+    model = WhisperForConditionalGeneration.from_pretrained(Config.MODEL_NAME).to(Config.DEVICE)
+    processor = WhisperProcessor.from_pretrained(Config.PROCESSOR_NAME,
+                                                 language=Config.LANGUAGE, task=Config.TASK)
+
+    result = dataset.map(make_transcriber(model, processor))
+    result.push_to_hub(Config.DATASET_NAME, split=Config.SPLIT)
+    print("Results pushed to the hub successfully.")
+
+
+if __name__ == "__main__":
+    main()

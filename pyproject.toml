@@ -1,0 +1,31 @@
+[project]
+name = "whisper-chan"
+version = "0.1.0"
+description = "Fine-tuning and evaluating Whisper for Khmer speech recognition"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+# Shared by most scripts. Each script's extra dependencies are in an extra below,
+# so e.g. the CER script does not need PortAudio or a GPU stack for training.
+dependencies = [
+    "datasets>=2.19,<4",        # 4.x dropped `trust_remote_code` loading scripts (openslr, fleurs)
+    "huggingface-hub>=0.23",
+    "khmerspell",
+    "tha",
+    "torch",
+    "transformers>=4.41,<5",    # `eval_strategy` (>=4.41); `tokenizer=` in Trainer removed in 5.x
+]
+
+[project.optional-dependencies]
+# fine-tuning-whisper.py
+train = ["accelerate", "evaluate", "jiwer", "librosa", "soundfile", "wandb"]
+# compute_cer.py
+eval = ["python-Levenshtein", "prettytable", "librosa", "soundfile"]
+# forced_alignment_sentence_level.py, automate_sementation.py
+align = ["torchaudio", "librosa", "soundfile", "numpy", "uroman", "khmer-nltk"]
+# terminal_realtime.py (PyAudio needs the PortAudio system library)
+realtime = ["faster-whisper", "SpeechRecognition", "PyAudio"]
+# gradio_app.py
+demo = ["gradio"]
+
+[tool.uv]
+package = false   # a set of scripts, not an installable library

@@ -1,6 +1,33 @@
 # Fine Tuning Whisper
 This project is dedicated to fine-tuning OpenAI’s Whisper model to significantly improve its performance on Khmer (Cambodian) speech recognition tasks. It includes custom scripts, curated datasets, and an end-to-end training pipeline specifically designed for enhancing Whisper’s transcription accuracy on Khmer audio. The goal is to make Whisper more robust and reliable for real-world transcription scenarios and voice-driven applications in the Khmer language.
 
+### Setup (uv)
+
+```bash
+# Each script's extras: train, eval, align, realtime, demo (repeat --extra to combine)
+uv run --extra train fine-tuning-whisper.py
+uv run --extra eval compute_cer.py
+uv run --extra align forced_alignment_sentence_level.py data/audio.wav data/transcript.txt data/output
+```
+
+Secrets are read from the environment, never from the code:
+- Hugging Face: `HF_TOKEN`, or a Colab/Kaggle secret named `hg-main`, or `huggingface-cli login`
+- Weights & Biases: `WANDB_API_KEY`, or `wandb login`
+
+### Layout
+
+| Path | Purpose |
+|---|---|
+| `khmer_asr/text.py` | The one place Khmer text rules live: zero-width removal, number spelling, CER normalization, romanization |
+| `khmer_asr/audio.py` | Sampling rate, the 30 s Whisper window, duration reporting |
+| `khmer_asr/hub.py` | Hugging Face login that works locally, on Colab and on Kaggle |
+| `fine-tuning-whisper.py` | Train Whisper on OpenSLR SLR42 + FLEURS |
+| `evaluation.py` | Transcribe an eval set and push the predictions to the Hub |
+| `compute_cer.py` | Score every model column in the eval set |
+| `forced_alignment_sentence_level.py` | Cut long recordings into per-sentence clips |
+| `automate_sementation.py` | Split raw text into sentences |
+| `terminal_realtime.py`, `gradio_app.py` | Live and web demos |
+
 ### Forced Alignment
 Forced alignment plays a critical role in preparing training data by synchronizing audio recordings with their corresponding text transcriptions. This process divides each audio file into segments that precisely match the spoken words or phrases in the transcript. Proper alignment ensures the model can learn accurate temporal relationships between sound and text, which is essential for improving both training efficiency and final transcription quality.
 

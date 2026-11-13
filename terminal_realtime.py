@@ -1,163 +1,127 @@
-'''
-!pip install faster-whisper SpeechRecognition PyAudio
-'''
+"""Live Khmer speech-to-text in the terminal with faster-whisper. Say "ឈប់" to stop.
 
+    uv run --extra realtime terminal_realtime.py
+"""
 
-import threading
-import queue
 import io
 import logging
+import queue
+import threading
+import time
+
 import pyaudio
 import speech_recognition as sr
-import time
 from faster_whisper import WhisperModel
 
+STOP_WORD = "ឈប់"
+_STOP = object()  # queue sentinel that ends the worker thread
+
+
 class STT:
-    """Real-time Speech to Text class using Faster WhisperModel and speech_recognition."""
+    """Records the default microphone in the background and transcribes each phrase.
+
+    Call `listen()` to start, poll `get_last_transcription()` for new text, and
+    `stop()` to end. Transcription runs on its own daemon thread.
+    """
 
     def __init__(self, model_size: str = "medium.en", device: str = "cuda", compute_type: str = "float16",
                  language: str = "en", logging_level: str = None):
-        """Initialize the STT object."""
+        if logging_level:
+            logging.basicConfig(level=logging_level.upper())
+
         self.recorder = sr.Recognizer()
         self.data_queue = queue.Queue()
-        self.transcription = ['']
+        self.transcription = []
         self.last_transcription = ""
         self.is_listening = True
-
-        self.model_size = model_size
-        self.device = device
-        self.compute_type = compute_type
         self.language = language
-        self.default_mic = self.setup_mic()
+        self.lock = threading.Lock()
+        self._stop_recording = None
+        self.mic_index = find_input_device()
 
         self.model = WhisperModel(
-            self.model_size, 
-            device=self.device,
-            compute_type=self.compute_type,
+            model_size,
+            device=device,
+            compute_type=compute_type,
             local_files_only=True,
             num_workers=2,
-            cpu_threads=4
+            cpu_threads=4,
         )
 
-        self.lock = threading.Lock()
-
-        if logging_level:
-            self.configure_logging(level=logging_level)
-
-        self.thread = threading.Thread(target=self.transcribe)
-        self.thread.setDaemon(True)
+        self.thread = threading.Thread(target=self._transcribe_forever, daemon=True)
         self.thread.start()
-
-        logging.info("Ready!\n")
+        logging.info("Ready!")
         print("Ready!\n")
 
-    def transcribe(self):
-        """Transcribe the audio data from the queue."""
-        while self.is_listening:
-            audio_data = self.data_queue.get()
+    def listen(self):
+        """Start recording the microphone in the background."""
+        with sr.Microphone(device_index=self.mic_index) as source:
+            self.recorder.adjust_for_ambient_noise(source)
+        self._stop_recording = self.recorder.listen_in_background(source, self._on_phrase)
 
-            if audio_data == 'ឈប់':
-                break
+    def stop(self):
+        """Stop recording and end the transcription thread. Safe to call more than once."""
+        if not self.is_listening:
+            return
+        logging.info("Stopping... Transcription:\n %s", self.transcription)
+        self.is_listening = False
+        if self._stop_recording:
+            self._stop_recording(wait_for_stop=False)
+        self.data_queue.put(_STOP)
+
+    def get_last_transcription(self) -> str:
+        """Text recognized since the previous call, or "" if nothing new."""
+        with self.lock:
+            text, self.last_transcription = self.last_transcription, ""
+        return text
+
+    def _on_phrase(self, _, audio_data):
+        self.data_queue.put(io.BytesIO(audio_data.get_wav_data()))
+
+    def _transcribe_forever(self):
+        while (audio := self.data_queue.get()) is not _STOP:
             segments, _ = self.model.transcribe(
-                audio_data,
-                beam_size=5,
-                language=self.language,
-                vad_filter=False,
-                multilingual=True
-            )
+                audio, beam_size=5, language=self.language, vad_filter=False, multilingual=True)
             for segment in segments:
                 text = segment.text.strip()
-                logging.info("[%.2fs -> %.2fs] %s" % (segment.start, segment.end, text))
+                logging.info("[%.2fs -> %.2fs] %s", segment.start, segment.end, text)
                 with self.lock:
                     self.transcription.append(text)
                     self.last_transcription = text
 
-            self.data_queue.task_done()
-            time.sleep(0.25)
 
-    def recorder_callback(self, _, audio_data):
-        """Callback function for the recorder."""
-        audio = io.BytesIO(audio_data.get_wav_data())
-        self.data_queue.put(audio)
-
-    def listen(self):
-        """Start listening to the microphone."""
-        with sr.Microphone(device_index=self.default_mic) as source:
-            self.recorder.adjust_for_ambient_noise(source)
-
-        self.recorder.listen_in_background(source=source, callback=self.recorder_callback)
-
-    def stop(self):
-        """Stop the transcription process."""
-        logging.info("Stopping...")
-        logging.info(f"Transcription:\n {self.transcription}")
-        self.is_listening = False
-        self.data_queue.put("STOP")
-
-    def get_last_transcription(self):
-        """Get the last transcription and clear it."""
-        with self.lock:
-            text = self.last_transcription
-            self.last_transcription = ""
-        return text
-
-    @staticmethod
-    def setup_mic():
-        """Set up the microphone."""
-        p = pyaudio.PyAudio()
-        default_device_index = None
-        try:
-            default_input = p.get_default_input_device_info()
-            default_device_index = default_input["index"]
-        except (IOError, OSError):
-            logging.error("Default input device not found. Printing all input devices:")
-            for i in range(p.get_device_count()):
-                info = p.get_device_info_by_index(i)
-                if info['maxInputChannels'] > 0:
-                    logging.info(f"Device index: {i}, Device name: {info['name']}")
-                    if default_device_index is None:
-                        default_device_index = i
-
-        if default_device_index is None:
-            raise Exception("No input devices found.")
-
-        return default_device_index
-
-    @staticmethod
-    def configure_logging(level: str = "INFO"):
-        """
-        Configure the logging level for the whole application.
-        :param level: The desired logging level. Should be one of the following:
-        'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'.
-        """
-        levels = {
-            'DEBUG': logging.DEBUG,
-            'INFO': logging.INFO,
-            'WARNING': logging.WARNING,
-            'ERROR': logging.ERROR,
-            'CRITICAL': logging.CRITICAL
-        }
-        logging.basicConfig(level=levels.get(level.upper(), logging.INFO))
+def find_input_device() -> int:
+    """Index of the default microphone, or of the first input device if there is no default."""
+    audio = pyaudio.PyAudio()
+    try:
+        return audio.get_default_input_device_info()["index"]
+    except (IOError, OSError):
+        logging.error("Default input device not found. Input devices:")
+        inputs = [i for i in range(audio.get_device_count())
+                  if audio.get_device_info_by_index(i)['maxInputChannels'] > 0]
+        for i in inputs:
+            logging.info("Device index: %d, Device name: %s", i, audio.get_device_info_by_index(i)['name'])
+        if not inputs:
+            raise RuntimeError("No input devices found.")
+        return inputs[0]
+    finally:
+        audio.terminate()
 
 
-# Usage
-try:
-    stt = STT(
-        model_size='whisper-tiny-khmer-ct2',
-        device="cpu",
-        compute_type='int8',
-        language='km',
-    )
+def main():
+    stt = STT(model_size='whisper-tiny-khmer-ct2', device="cpu", compute_type='int8', language='km')
     stt.listen()
+    try:
+        while stt.is_listening:
+            text = stt.get_last_transcription()
+            if text:
+                print("អ្នកនិយាយ :", text)
+                if STOP_WORD in text:
+                    stt.stop()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        stt.stop()
 
-    while stt.is_listening:
-        last_transcription = stt.get_last_transcription()
-        if len(last_transcription) > 0:
-            print("អ្នកនិយាយ :", last_transcription)
-            if "ឈប់" in last_transcription.lower():
-                stt.stop()
 
-        time.sleep(1)
-
-except KeyboardInterrupt:
-    pass
+if __name__ == "__main__":
+    main()
